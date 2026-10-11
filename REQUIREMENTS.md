@@ -157,7 +157,7 @@ A native desktop application that is my main way of seeing and steering efforts.
 - **FR-38** It must be a client of the harness interface in §2.1. It holds no effort state of its own and adds no capability the CLI lacks.
 
 Platform and technology constraints (see also NFR-7):
-- It must be built with a native toolkit (such as GTK or Qt). Electron and webview-based shells are excluded. The choice of toolkit is left to planners, and may influence the harness core's language.
+- It must be built with a native toolkit (such as GTK or Qt). Electron is excluded. A lightweight webview-based shell (such as Tauri) is allowed only as a fallback, if planners show that a native toolkit is a poor fit for a specific requirement such as the turn rendering in FR-32. The choice of toolkit is left to planners, and may influence the harness core's language.
 - In v1 it runs on the same machine as the VM host. The harness interface should not make a remote client impossible later.
 - It must run well on Wayland (Hyprland on Omarchy) and on Fedora's default desktop. It must not depend on a system tray, which Hyprland does not provide by default.
 - It is not a TUI.
@@ -199,7 +199,7 @@ None at present. Earlier questions are resolved below.
 | Cost guardrails | Wall-clock and max-turn limits plus the concurrency cap, with no dollar caps (FR-23). |
 | Multiple repos | One master containing all target repos. |
 | Master refresh | Manual in v1. |
-| Command center toolkit | Native toolkit only; Electron and webview shells excluded (§4.8). |
+| Command center toolkit | Native toolkit preferred; Electron excluded; a lightweight webview shell is an allowed fallback only if native proves a poor fit (§4.8). |
 | Command center location | Same machine as the VM host in v1, without precluding a remote client (§4.8). |
 | Interactive access from the GUI | Launch an external terminal (FR-37). |
 
