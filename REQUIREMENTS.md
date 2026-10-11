@@ -58,8 +58,9 @@ These follow from the command center and the host platforms. Planners must accou
 
 ### 4.1 Master image management
 
-- **FR-1** The master must have a user whose username and UID match my host account.
-  - Rationale: to be stated by the author. If no reason survives review (for example, no host directories are shared into workers), this requirement should be dropped.
+- **FR-1** The master must have a user with the same username as my host account, so my home directory has the same path on the host and in every worker.
+  - Absolute paths in the configuration I bring over (settings, hooks, MCP config, `CLAUDE.md`) and in per-project data must resolve identically in a worker.
+  - Every file brought in from the host must end up owned by this user, with correct permissions. A matching UID is not required, but ownership must be set explicitly (FR-3, step 2).
 - **FR-2** The master must contain:
   - Claude Code, pinned to a specific version with auto-update disabled, `gh`, `git`, and the project toolchains.
   - A clone of each target repo.
