@@ -69,10 +69,14 @@ These follow from the command center and the host platforms. Planners must accou
 - **FR-3** Refreshing the master must produce a **new** master version. It must never modify an existing version in place. A refresh must:
   1. Bring in my current dotfiles and config from the host, from a configurable list. The defaults are:
      - `~/.gitconfig`
-     - `~/.config/gh`
      - `~/.claude/settings.json`
      - `~/.claude/CLAUDE.md`
-     - skills, agents, MCP config and shell rc as listed
+     - skills, agents and shell rc as listed
+     - the parts of `~/.claude.json` that workers need, handled as FR-15 describes
+
+     Two things are not plain file copies:
+     - **GitHub credential.** `gh` may keep its token in the host keyring, so `~/.config/gh` can't be relied on. The refresh must read the token from the host's `gh` login (`gh auth token`) and configure workers from it (FR-16). Nothing in a worker may depend on the host keyring.
+     - **Claude Code state.** See FR-15.
   2. Ensure correct ownership of my home directory.
   3. Update each repo to the latest default branch, as my user.
   4. Run optional per-repo prep steps, such as installing dependencies.
@@ -91,7 +95,15 @@ These follow from the command center and the host platforms. Planners must accou
   - its PR is merged or closed
   - it has been suspended longer than a separate, much longer configurable cutoff
   - I tear it down manually
-- **FR-39** If new feedback arrives on an open PR whose worker was torn down for age or by hand, the harness must **revive** the effort: spawn a new worker from the current master, check out the PR's remote branch, and start a fresh session seeded with the PR context. Restoring the old session is not required. Before any teardown, the harness must copy the effort's session transcript to the host.
+
+  Teardown for age or by hand is subject to the work-preservation check in FR-41.
+- **FR-39** If new feedback arrives on an open PR whose worker was torn down for age or by hand, the harness must **revive** the effort: spawn a new worker from the current master, check out the PR's remote branch (or the effort's salvage branch if FR-41 created one), and start a fresh session seeded with the PR context. Restoring the old session is not required. Before any teardown, the harness must copy the effort's session transcript to the host.
+- **FR-41** Teardown must not silently lose work. Before removing a worker for age or by hand, the harness must check every repo in the worker for uncommitted changes, untracked files that git doesn't ignore, and commits that are not on the remote. The check may resume a suspended worker.
+  - If there is nothing to save, teardown proceeds.
+  - **Age-based teardown:** the harness commits any uncommitted work as a WIP commit, pushes everything to a salvage branch on the remote (for example `klank/salvage/<effort>`), and then tears down. If the push fails, the worker is kept and I am notified (FR-36). The harness retries later (NFR-5).
+  - **Manual teardown:** the harness refuses by default and shows what would be lost. I can choose to save to the salvage branch and tear down, or to discard. Discarding needs explicit confirmation in the CLI and in the command center.
+  - Teardown triggered by a merged or closed PR skips the check, since the work is merged or deliberately abandoned. It still copies the session transcript (FR-39).
+  - Build artifacts and other git-ignored files are not preserved.
 - **FR-12** Per-worker vCPU, RAM and maximum disk size must be configurable, with a global default.
 
 ### 4.3 Identity and authentication
@@ -99,9 +111,15 @@ These follow from the command center and the host platforms. Planners must accou
 - **FR-13** Claude Code in workers must authenticate with a long-lived subscription token from `claude setup-token`, supplied via the `CLAUDE_CODE_OAUTH_TOKEN` environment variable.
 - **FR-14** My interactive Claude login (`~/.claude/.credentials.json`) must **not** be copied into the master. Many VMs refreshing one shared login is avoided by design.
 - **FR-15** Claude Code in workers must load my normal configuration: settings, CLAUDE.md, skills and MCP servers.
+  - User-scoped MCP servers, onboarding state and per-project workspace trust live in `~/.claude.json`, not in `~/.claude/settings.json`. The master must therefore carry a `~/.claude.json` built for workers. It must not be a verbatim copy of the host's file.
+  - It must include my user-scoped MCP server definitions and mark onboarding complete and each target repo path as trusted.
+  - It must leave out host login and account identity (FR-14), and host-specific per-project state and history. Planners must check the exact fields against the pinned Claude Code version.
+  - MCP servers that can't work in a worker, such as ones needing interactive OAuth or pointing at host-local services, must be either made to work or excluded. The refresh must report which ones were excluded and why. A silently missing server is not acceptable.
   - Note: Claude Code's "bare" mode skips this configuration and does not read `CLAUDE_CODE_OAUTH_TOKEN`, so it is not suitable here.
-  - Headless operation must not be broken by first-run onboarding or workspace-trust prompts. Every master version must pass a smoke test before it becomes current: in a throwaway clone, run a trivial headless turn and confirm that settings, skills and MCP servers loaded, that no interactive prompt appeared, and that `gh` is authenticated. A failed smoke test fails the refresh (FR-4).
+  - Headless operation must not be broken by first-run onboarding or workspace-trust prompts. Every master version must pass a smoke test before it becomes current: in a throwaway clone, run a trivial headless turn and confirm that settings, skills and MCP servers loaded, that no interactive prompt appeared, that `gh` is authenticated, and that git can reach every target repo's remote with those credentials (for example `git ls-remote`). A failed smoke test fails the refresh (FR-4).
 - **FR-16** `gh` and git push must work in workers with my identity, with no prompts.
+  - The credential comes from the token the refresh read from my host `gh` login (FR-3), not from a copy of `~/.config/gh`.
+  - Where the token lives is left to planners: baked into the master, or supplied to each worker at spawn. Supplying it at spawn keeps it out of the image and lets it rotate without a refresh. Either way it falls under the credential risk in §6.
 
 ### 4.4 Driving Claude Code
 
@@ -114,8 +132,16 @@ These follow from the command center and the host platforms. Planners must accou
 - **FR-20** The full structured output of every turn must be saved on the host, per effort and per turn. The final outcome must be stored alongside it, including result text, exit status, cost and any permission denials.
 - **FR-21** Only one turn may run per worker at a time. A second turn for a busy worker must queue or fail clearly.
 - **FR-22** I must be able to SSH into any worker and continue its session interactively in Claude Code. While I'm attached, the harness must not start turns on that worker.
-  - Attachment is detected through a harness-provided attach command that holds a per-worker lock. A plain `ssh` that bypasses it is not detected, and this is documented.
+  - The harness must detect attachment in two ways:
+    - A harness-provided attach command that holds a per-worker lock. This is the preferred route.
+    - A check, made before every turn starts, for a live interactive `claude` process on the worker. This catches a plain `ssh` that bypasses the attach command.
+  - If either is present, the effort is in the attached state (FR-42) and the turn is held until I detach. The held turn is queued, not dropped (FR-21).
+  - An open shell with no interactive `claude` process does not count as attached. This is a known limit. If I start `claude` just after the check, the turn may already have begun, and this is documented.
 - **FR-23** A turn exceeding a configurable wall-clock limit or maximum turn count must be interrupted gracefully, so the session stays resumable, before any forced kill. Spend is limited by these and by the concurrency cap (NFR-1), not by dollar amounts.
+- **FR-44** I must be able to abort a running turn from the CLI and from the command center, and to drop turns that are queued for an effort.
+  - An abort uses the same graceful interrupt as FR-23, so the session stays resumable. A forced kill happens only if the turn hasn't stopped within a configurable grace period.
+  - After an abort the effort enters the paused state (FR-42). Queued turns are kept, and nothing starts until I resume the effort or send it a prompt. Sending a prompt counts as a harness-initiated prompt for the circuit breaker (FR-29).
+  - The turn's outcome is recorded as aborted, distinct from a crash or a limit being hit. Work already done in the worker is left as it is.
 - **FR-40** If a turn fails because the subscription usage limit is reached, the harness must mark affected efforts as rate-limited, queue their pending turns, and retry after the limit resets. The command center and notifications must show this state (FR-36).
 
 ### 4.5 Effort intake
@@ -125,24 +151,64 @@ These follow from the command center and the host platforms. Planners must accou
   2. Builds the first prompt from the issue title and body plus a configurable instruction template: branch naming, open a draft PR, link the issue.
   3. Runs the first turn.
 - **FR-25** I must be able to start an effort from a free-form prompt, for non-issue threads.
-- **FR-26** The harness must keep a persistent registry of efforts: name, repo, issue, PR number, session identifier, master version, state and last activity.
+- **FR-26** The harness must keep a persistent registry of efforts: name, repo, issue, PR number, session identifier, master version, state (FR-42) and last activity.
+- **FR-42** Every effort must be in exactly one of the states below, stored in the registry. Every state change must be recorded as an event with a timestamp and a cause. The events feed live updates (§2.1), notifications (FR-36) and reconciliation (NFR-8).
+
+  | State | Meaning |
+  |---|---|
+  | spawning | Worker is being created, booted and brought up to date (FR-6, FR-9). |
+  | running | A turn is executing. |
+  | idle | Worker is up. No turn is running or queued. |
+  | attached | I am attached interactively (FR-22). No turns start. |
+  | suspended | Worker is suspended with its disk intact (FR-10). |
+  | rate-limited | Pending turns are held until the usage limit resets (FR-40). |
+  | paused | No turns start until I resume the effort or send it a prompt. Set by the circuit breaker (FR-29), by an abort (FR-44) or by me. |
+  | reviving | A new worker is being built from the PR branch (FR-39). |
+  | tearing down | Worker is being removed (FR-11, FR-41). |
+  | torn down | No worker. The PR is still open, so the effort can be revived (FR-39). |
+  | done | PR merged or closed, and the worker has been removed (FR-30). |
+  | failed | Spawn or revive failed, or the worker is unrecoverable. Needs my action. |
+
+  - The outcome of the last turn is recorded separately from the state: succeeded, failed, interrupted (NFR-8), aborted by me (FR-44), stopped at the time or turn limit (FR-23), blocked by the usage limit (FR-40), or needs input (FR-45).
+  - The states spawning, running, idle, attached, suspended, reviving and tearing down have a worker. Torn down and done have none. Rate-limited and paused efforts keep their worker, which may be running or suspended. Suspending such a worker does not change the effort's state.
+  - Planners must define the full set of allowed transitions. A transition that isn't defined is rejected, and reconciliation (NFR-8) resolves any mismatch between registry and reality through defined transitions only.
 
 ### 4.6 PR feedback loop
 
 - **FR-27** The harness must watch each active effort's PR for review comments, review summaries, conversation comments and failing CI checks. It must track which items it has already handled by ID, not by "newer than the last turn", so nothing arriving during a turn is missed or handled twice.
 - **FR-28** When new feedback appears, the harness must continue that effort's session with a prompt saying there is new feedback on PR #n to read and address. A submitted review triggers a turn at once. Loose comments trigger one after a configurable quiet period, so a burst of comments produces one turn.
-- **FR-29** The harness must never start a turn in response to anything authored by my GitHub account. Because the agent posts as me, this also prevents the agent from answering its own comments. Only feedback from other authors triggers turns.
-  - Steering an effort myself is done through the harness (FR-35), not through PR comments.
+- **FR-29** The harness must never start a turn in response to something the agent itself posted. Because the agent posts as my GitHub account, this is decided by a marker on agent-authored content, not by author.
+  - Everything the agent posts to GitHub (comments, review replies, the PR body) must carry a marker, such as a hidden HTML comment identifying the effort.
+  - The harness must apply the marker itself, for example through a `gh` wrapper in the worker. It must not depend on the agent remembering to add it.
+  - Feedback without the marker triggers turns, including comments and reviews from my own account. This lets me steer an effort from the PR as well as through the harness (FR-35).
   - Failing CI checks have no author and still trigger turns (FR-27).
+  - **Circuit breaker:** after a configurable number of consecutive feedback-triggered turns on one effort (default 5) with no harness-initiated prompt in between, the harness must pause the effort and notify me (FR-36). This bounds the damage if a marker is ever missed.
 - **FR-30** When a PR is merged or closed, the harness must mark the effort done and trigger teardown.
+- **FR-43** An optional **feedback author allowlist** is a prompt-injection mitigation (§6). It is unrelated to loop prevention (FR-29).
+  - It is off by default. With no allowlist configured, unmarked feedback from any author can trigger turns, since all authors are trusted in v1 (§1.1).
+  - When configured, feedback from authors not on the list must neither trigger a turn nor be included in any prompt.
+  - It can be set globally or per repo, and must be changeable without code changes.
 
 ### 4.7 Visibility
 
 - **FR-31** I must be able to list all efforts with:
-  - state (running / idle / suspended / done)
+  - state (FR-42)
   - PR link
   - last turn time and outcome
   - cumulative cost
+- **FR-45** The harness must raise an **attention item** for anything that needs me. Attention items are stored with the harness, not in a client, so they persist when the command center is closed (§2.1).
+  - Each item has an effort, a type, a timestamp and a status (open or acknowledged). I can acknowledge one explicitly. Resolving the cause, such as resuming a paused effort, closes it.
+  - Types:
+    - turn needs input: the agent says it is blocked on me
+    - turn failed, or stopped at a time or turn limit (FR-23)
+    - permission denial (FR-18)
+    - effort rate-limited (FR-40), paused (FR-29, FR-44) or failed (FR-42)
+    - teardown blocked because the salvage push failed (FR-41)
+    - PR opened or marked ready for review
+    - effort is waiting on me: a turn finished and nothing else is queued
+  - **Needs input:** the instruction template (FR-24) and every follow-up prompt must give the agent a convention for saying it is blocked on a decision, and the harness must detect it in the turn output. Planners choose the mechanism. A turn that ends this way is recorded with the outcome "needs input" and is not treated as an ordinary success.
+  - Which types produce a desktop notification (FR-36) is configurable. By default, all of them do.
+  - Open items must show in the effort list (FR-31).
 - **FR-32** I must be able to view a readable rendering of an effort's latest turn: assistant text and tool calls.
 
 ### 4.8 Command center (intent only; detailed requirements to follow)
@@ -151,8 +217,8 @@ A native desktop application that is my main way of seeing and steering efforts.
 
 - **FR-33** The command center must show all efforts and their live state, covering everything in FR-31, and update without manual refresh.
 - **FR-34** It must let me drill into an effort: turn history, the readable turn rendering (FR-32), PR link and cost.
-- **FR-35** It must let me perform the lifecycle operations available in the CLI: start an effort (issue or free-form), suspend, resume, tear down, and manage master versions. Sending a follow-up prompt to an existing effort is required, because it is my only way to steer an effort (FR-29). The full set of operations is TBD.
-- **FR-36** It must surface events that need my attention, such as a failed turn, a permission denial, or a PR ready for review. It should do so through desktop notifications.
+- **FR-35** It must let me perform the lifecycle operations available in the CLI: start an effort (issue or free-form), abort a turn or drop queued turns (FR-44), suspend, resume, tear down, and manage master versions. Sending a follow-up prompt to an existing effort is required, as the way to steer an effort without going through GitHub (FR-29). The full set of operations is whatever the CLI offers (FR-38).
+- **FR-36** It must surface the attention items defined in FR-45, through desktop notifications and in the effort list. Open items raised while the command center was closed must still be shown when it starts.
 - **FR-37** It must provide a way to open an interactive session on a worker (FR-22) by launching an external terminal.
 - **FR-38** It must be a client of the harness interface in §2.1. It holds no effort state of its own and adds no capability the CLI lacks.
 
@@ -165,7 +231,7 @@ Platform and technology constraints (see also NFR-7):
 ## 5. Non-Functional Requirements
 
 - **NFR-1 Concurrency:** support at least 3 simultaneous workers on one host, with the cap configurable and defaulting to 3. Per-worker resource defaults are set during planning, sized so 3 fit comfortably on the host.
-- **NFR-2 Spawn time:** a new worker should be SSH-ready within ~30 s. Target TBD.
+- **NFR-2 Spawn time:** a new worker should be SSH-ready within about 30 s of the spawn command. This is a target, not a pass/fail gate, until it has been measured (§7). The first-boot fetch (FR-9) is not included.
 - **NFR-3 Disk:** a worker's disk clone should start near zero size and grow only with the effort's changes, up to a configurable maximum.
 - **NFR-4 Master safety:** nothing may write to a master version that has dependent workers.
 - **NFR-5 Idempotence:** every operation must be safe to retry after a failure, without corrupting state or leaking VMs.
@@ -180,18 +246,36 @@ v1 deliberately "runs with scissors": private repos only, trusted authors only, 
 - **Full credentials in every worker.** Each worker can push to any repo and act as me on GitHub. This is accepted for v1.
   - Possible mitigation: use a fine-grained GitHub token limited to the target repos.
 - **Prompt injection via issue and PR text.** An agent reading text it treats as instructions runs with my credentials and without permission prompts. This is accepted because all authors are trusted.
-  - Future mitigation: scrubbing through the NFR-6 seam, labeled-issue intake, and an allowlist of feedback authors.
+  - v1 mitigation, off by default: the optional feedback author allowlist (FR-43).
+  - Future mitigation: scrubbing through the NFR-6 seam and labeled-issue intake.
 - **No egress filtering in v1.** Workers have the same network access as my machine. The NFR-6 seam leaves room to add it.
 
 ## 7. Open Questions
 
-None at present. Earlier questions are resolved below.
+Questions that need an answer from me:
 
-### 7.1 Decisions
+1. **Command center detail.** §4.8 records intent only. Detailed requirements (screens, interactions, the turn rendering) still have to be written. They can follow the harness requirements, but §2.1 must hold in the meantime.
+2. **Spawn time target (NFR-2).** Is 30 s the right target, or should it be a hard limit? It should be settled once real spawn times are measured.
+
+### 7.1 Deferred to planners
+
+These are decided during planning. The requirements set the constraints and leave the choice open.
+
+- Command center toolkit, and whether it affects the core's language (§4.8).
+- Per-worker resource defaults, sized so 3 workers fit comfortably on the host (NFR-1, FR-12).
+- Exact `~/.claude.json` fields to carry into the master (FR-15).
+- Where the GitHub token lives: in the master, or supplied to each worker at spawn (FR-16).
+- The full set of allowed state transitions (FR-42).
+- The mechanism for the "needs input" convention (FR-45).
+- Whether the content-filter seam (NFR-6) also enforces the author allowlist (FR-43).
+- Whether the attach check counts anything beyond an interactive `claude` process (FR-22).
+
+### 7.2 Decisions
 
 | Topic | Decision |
 |---|---|
-| Loop prevention | Ignore everything authored by my account and react only to other authors (FR-29). |
+| Loop prevention | Mark everything the agent posts and ignore marked content. Unmarked feedback, including from my own account, triggers turns. A circuit breaker backstops a missed marker (FR-29). |
+| Feedback author filtering | Optional allowlist, off by default, as a prompt-injection mitigation only (FR-43). |
 | Permission policy | Broad autonomous action in v1, configurable (FR-18). |
 | Trigger model | Manual start only in v1. |
 | Idle behavior and session continuity | Suspend on idle, tear down only after a long cutoff, merge/close or by hand, and revive from the remote branch with a fresh session when feedback arrives (FR-10, FR-11, FR-39). |
@@ -205,16 +289,117 @@ None at present. Earlier questions are resolved below.
 
 ## 8. Acceptance Criteria (v1)
 
-- [ ] Refreshing the master produces a new version and leaves existing workers unaffected.
-- [ ] Killing the harness mid-spawn and mid-turn, then restarting it, leaves no orphan VMs or disks, and the interrupted effort can continue.
-- [ ] A master refresh whose smoke test fails leaves the current master unchanged and cleans up the partial version.
-- [ ] Three efforts can run at the same time on separate issues, each producing its own draft PR, with no interference.
-- [ ] A review comment from another author on one PR causes only that effort's session to continue and push a follow-up commit.
-- [ ] A comment from my own account, including the agent's replies, never starts a turn.
-- [ ] I can SSH into any worker and continue its session interactively.
-- [ ] Merging a PR leads to its worker being torn down. Unreferenced master versions are prunable.
-- [ ] I can see the state, PR and cumulative cost of every effort at a glance.
-- [ ] After a rate-limit failure, affected efforts show as rate-limited and resume on their own after the reset.
-- [ ] An effort torn down for age with an open PR is revived when new feedback arrives, on the PR branch with a fresh session.
-- [ ] The CLI and command center are both clients of the same harness interface. Quitting the command center changes nothing about running efforts.
-- [ ] The harness and command center install and pass the above on both Omarchy and Fedora.
+Each criterion says what to do and what observable result passes it. "Observable" means something visible in the registry, the event log, the host-side turn records, CLI or command center output, the host's VM and disk listings, or GitHub. Nothing is judged by feel.
+
+**Fixtures.** A private test repo with a small test suite (including a test that binds a fixed port) and a build step. A second GitHub account, used as an "other author". Test hooks that let a test shorten the idle, quiet-period and age timers, stub a usage-limit failure, and disable the marker wrapper (FR-29). Anything that depends on live model behaviour is also tested against canned turn output, so the harness logic is verified without relying on the model.
+
+### 8.1 Master and workers
+
+- [ ] **AC-1 Refresh leaves workers alone** (FR-3, FR-5, NFR-4)
+  - Do: with one worker running from master v1 and mid-turn, refresh the master.
+  - Pass when: master v2 exists and is current. v1 still exists and is unchanged. The worker finishes its turn, and the registry still shows it on v1.
+- [ ] **AC-2 Failed smoke test** (FR-4, FR-15)
+  - Do: make the smoke test fail (for example, an invalid GitHub token), then refresh.
+  - Pass when: the refresh reports failure with the reason. The current master has the same version and image checksum as before. No partial version appears in the version list or on disk.
+- [ ] **AC-3 Worker identity** (FR-6, FR-7, FR-8)
+  - Do: spawn two workers from the same master version.
+  - Pass when: both are reachable as `ssh <worker-name>`. Hostnames, MAC addresses and SSH host keys all differ.
+- [ ] **AC-4 Fresh code** (FR-9)
+  - Do: push a new commit to the test repo's default branch after the master was built, then spawn a worker.
+  - Pass when: before the first turn starts, the worker's repo is at that commit.
+- [ ] **AC-5 Credentials** (FR-13, FR-14, FR-16)
+  - Do: in a new worker, check `gh auth status`, run a `git push` to the test repo, and look for `~/.claude/.credentials.json`.
+  - Pass when: `gh` is authenticated, the push succeeds without any prompt, and the credentials file does not exist. A headless turn runs using `CLAUDE_CODE_OAUTH_TOKEN`.
+- [ ] **AC-6 Idle suspend and resume** (FR-10)
+  - Do: set a short idle period and leave an effort idle. Then send it a prompt.
+  - Pass when: the effort reaches `suspended` and its disk is kept. The prompt resumes the worker automatically and continues the same session ID.
+- [ ] **AC-7 Merge teardown and pruning** (FR-5, FR-11, FR-30)
+  - Do: merge an effort's PR. Then try to prune the master version it used, first while another worker still uses that version and again once none does.
+  - Pass when: within one poll interval the worker and its disk are gone, the state is `done`, and the session transcript is on the host. Pruning is refused while a worker depends on the version and succeeds when none does.
+
+### 8.2 Turns and sessions
+
+- [ ] **AC-8 Turn records** (FR-17, FR-19, FR-20)
+  - Do: run a first turn and a follow-up turn on an effort.
+  - Pass when: the host has the full structured output for each turn, per effort and per turn. Each has an outcome record with result text, exit status, cost and permission denials. Both turns share one session ID.
+- [ ] **AC-9 Turn limits** (FR-23)
+  - Do: set a very short wall-clock limit and give the effort a long task. Then send a follow-up prompt.
+  - Pass when: the turn is interrupted before any forced kill, its outcome is "stopped at limit", and the follow-up continues the same session.
+- [ ] **AC-10 Abort** (FR-44)
+  - Do: start a turn, queue a second one, then abort the first.
+  - Pass when: the turn stops gracefully with outcome "aborted". The effort is `paused` and the second turn is still queued. Sending a prompt starts a turn in the same session.
+- [ ] **AC-11 Attach** (FR-22)
+  - Do: (a) attach with the attach command. (b) Separately, `ssh` in directly and start an interactive `claude`. In each case, trigger a feedback turn while attached. Then detach.
+  - Pass when: in both cases the effort shows `attached`, the turn is held and queued, and it starts after detach. The session transcript shows no interleaved writes.
+- [ ] **AC-12 Rate limit** (FR-40)
+  - Do: stub a usage-limit failure on a turn, with a reset time a short way ahead.
+  - Pass when: the effort shows `rate-limited` and I am notified. Pending turns are queued. After the stubbed reset, the turns run with no action from me.
+- [ ] **AC-13 Needs input** (FR-45, FR-36)
+  - Do: (a) feed the harness canned turn output that uses the needs-input convention. (b) Run one live turn on a task that cannot proceed without a decision from me. In both cases, keep the command center closed until after the turn ends.
+  - Pass when: the outcome is "needs input", an attention item is open, and a notification was sent. When the command center starts, it shows the open item.
+
+### 8.3 Concurrency and the feedback loop
+
+- [ ] **AC-14 Three concurrent efforts** (FR-24, NFR-1)
+  - Do: start three efforts from three issues at the same time.
+  - Pass when: the turn records show overlapping time windows for all three. Each effort has its own worker and its own draft PR linked to its issue. Each PR contains only its own effort's commits. The fixed-port test passes in all three.
+- [ ] **AC-15 Feedback reaches the right session** (FR-27, FR-28)
+  - Do: with three efforts in flight, have the other author submit a review on PR A.
+  - Pass when: only effort A runs a new turn, in its existing session. A follow-up commit appears on PR A's branch. B and C have no new turns.
+- [ ] **AC-16 Each item handled once** (FR-27, FR-28)
+  - Do: post three loose comments in quick succession, then one more during the resulting turn.
+  - Pass when: the first three produce one turn after the quiet period. The fourth is handled by a later turn. The turn records show no comment ID handled twice and none missed.
+- [ ] **AC-17 Loop prevention** (FR-29)
+  - Do: have the agent reply to a review comment. Then post an unmarked comment from my own account.
+  - Pass when: the agent's reply carries the marker, and no turn starts from it within twice the quiet period. My unmarked comment starts a turn.
+- [ ] **AC-18 Circuit breaker** (FR-29)
+  - Do: disable the marker wrapper, set the breaker threshold to 2, and have the agent comment on its own PR each turn.
+  - Pass when: after two consecutive feedback-triggered turns the effort is `paused` and an attention item is raised.
+- [ ] **AC-19 Author allowlist** (FR-43)
+  - Do: with no allowlist, post a comment as the second account. Then configure an allowlist without that account and post another.
+  - Pass when: the first comment starts a turn. The second neither starts a turn nor appears in any later prompt.
+
+### 8.4 Lifecycle safety and recovery
+
+- [ ] **AC-20 Crash recovery** (NFR-5, NFR-8)
+  - Do: in separate runs, kill the harness with SIGKILL (a) during spawn and (b) during a turn. Restart it each time.
+  - Pass when: after reconciliation, every VM and disk on the host is referenced by the registry. For (a), the effort either finishes spawning or is cleaned up through a defined transition. For (b), the last turn shows "interrupted", and a follow-up prompt continues the same session.
+- [ ] **AC-21 Age teardown saves work** (FR-11, FR-41)
+  - Do: give an effort an open PR, one unpushed commit and one uncommitted change. Let it exceed the age cutoff.
+  - Pass when: a salvage branch on the remote contains both pieces of work. The worker and disk are gone, the transcript is on the host, and the state is `torn down`.
+- [ ] **AC-22 Revive** (FR-39)
+  - Do: after AC-21, post new feedback from the other author.
+  - Pass when: the effort passes through `reviving` to a new worker on the salvage branch. The session ID is new, and the first prompt includes the PR context.
+- [ ] **AC-23 Salvage failure** (FR-41)
+  - Do: make the remote unreachable, then let an age teardown run on a dirty worker.
+  - Pass when: the worker is kept, an attention item is raised, and teardown is retried once the remote is reachable.
+- [ ] **AC-24 Manual teardown** (FR-41)
+  - Do: tear down a dirty worker by hand.
+  - Pass when: the tool refuses and lists what would be lost. Save-and-tear-down puts the work on the salvage branch. Discard works only after explicit confirmation.
+- [ ] **AC-25 One state, always** (FR-42)
+  - Do: run the scenarios above and read the event log.
+  - Pass when: at every point each effort is in exactly one defined state. Every state change appears as an event with a timestamp and cause. After a restart, the registry matches the VMs that exist.
+
+### 8.5 Visibility and the command center
+
+- [ ] **AC-26 List view** (FR-31, FR-45)
+  - Do: with efforts in several states, run the CLI list command and open the command center.
+  - Pass when: a single view shows, for every effort, the state, PR link, last turn time and outcome, cumulative cost, and open attention items. No per-effort command is needed.
+- [ ] **AC-27 Live updates** (FR-33)
+  - Do: with the command center open, change an effort's state from the CLI.
+  - Pass when: the command center shows the change within 5 seconds with no manual refresh.
+- [ ] **AC-28 Client independence** (§2.1, FR-38)
+  - Do: quit the command center during a running turn. Then do every FR-35 operation from the CLI.
+  - Pass when: the turn completes and the registry and events are the same as in a run without the command center. Every operation the command center offers is also available in the CLI.
+- [ ] **AC-29 Desktop fit** (§4.8, NFR-7)
+  - Do: start the command center on Hyprland on Omarchy and on Fedora's default desktop, with no system tray.
+  - Pass when: it runs, and attention notifications arrive on both.
+
+### 8.6 Hosts and measurements
+
+- [ ] **AC-30 Both distros** (NFR-7)
+  - Do: install on a clean Omarchy host and a clean Fedora host using the documented steps, then run all the criteria above.
+  - Pass when: every criterion passes on both.
+- [ ] **AC-31 Measurements** (NFR-2, NFR-3)
+  - Do: spawn 10 workers one after another. Record the time to SSH-ready and each fresh clone's allocated size against its master.
+  - Pass when: the median and worst times and the sizes are recorded. This is informational. It sets the target in §7.
