@@ -12,7 +12,7 @@ How these requirements are met (languages, tools, structure) is left to the impl
 
 - **Full VMs are a deliberate choice**, not a conclusion derived from a comparison with worktrees or containers. Planners should not re-litigate it.
 - **Trusted inputs for v1.** Efforts run against private repos, and every author of issues, PRs and comments is trusted. This is what makes the v1 security posture in §6 acceptable. The design must leave room to tighten it later (NFR-6).
-- **Tokens are for judgement.** The harness does everything deterministic itself: booting, fetching, installing dependencies, migrating and seeding, starting the app, polling GitHub, detecting attachment and retrying after a rate limit. It does not leave these to the agent, because each one would cost tokens and usage, and some would be done inconsistently. The agent is told what has already been done (FR-10) so it doesn't repeat it.
+- **Tokens are for judgement.** The harness does everything deterministic itself: booting, fetching, installing dependencies, migrating and seeding, starting the app, watching GitHub, detecting attachment and retrying after a rate limit. It does not leave these to the agent, because each one would cost tokens and usage, and some would be done inconsistently. The agent is told what has already been done (FR-10) so it doesn't repeat it.
 - **A native desktop command center** (§4.8) is part of the product. It is detailed later, but it affects architecture now (§2.1).
 
 ## 2. Scope
@@ -243,7 +243,7 @@ These follow from the command center and the host platforms. Planners must accou
   | `done` | Anything | any | No revive. Prompts are refused and feedback is ignored. |
 - **FR-33** An effort may have no PR. This is a condition of the effort, not a separate kind of effort, and applies to free-form efforts (FR-30) and to issue efforts where the agent hasn't opened a PR yet or never does.
   - **Association.** The harness must notice when a PR for the effort comes to exist, and record it in the registry as an event. Planners choose the mechanism (§7.1). I can also link a PR by hand from the CLI and the command center, for a PR opened some other way. From then on the effort is treated as a PR effort in every respect.
-  - **No PR means no feedback loop.** FR-34 to FR-37 apply only once a PR is associated. There is no feedback to handle until then, so no turn starts except from me. Looking for the PR itself is allowed, per the polling principle in FR-34.
+  - **No PR means no feedback loop.** FR-34 to FR-37 apply only once a PR is associated. There is no feedback to handle until then, so no turn starts except from me. Looking for the PR itself is allowed, per the watching principle in FR-34.
   - **Ending.** There is no merge or close event, so only manual teardown ends the worker, or the opt-in age cutoff (FR-12) if I have turned it on, both subject to FR-14. Either leaves the effort `torn down`, which can be revived by hand (FR-13).
   - **Normal case.** Every effort starts with no PR (FR-29), and stays that way until I ask the agent for one.
   - **Mark done.** I must be able to mark a `torn down` effort, with or without a PR, as `done` from the CLI and the command center. This ends the effort for good. It can no longer be revived, and new feedback on its PR no longer revives it. I can also mark an `active` effort done, which tears it down first, subject to FR-14.
@@ -251,8 +251,8 @@ These follow from the command center and the host platforms. Planners must accou
 
 ### 4.6 PR feedback loop
 
-- **FR-34** The harness must watch each effort's open PR for its state (ready for review, merged, closed), review comments, review summaries, conversation comments and failing CI checks. It must track which items it has already handled by ID, not by "newer than the last turn", so nothing arriving during a turn is missed or handled twice. An item counts as handled once it has been included in a prompt sent to the agent, or when I dismiss it.
-  - **Polling principle.** The harness polls GitHub whenever it has a reason to, at a pace suited to that reason: whether a PR exists for an effort's branch (FR-33), PR state, new feedback, CI results. The harness does the polling, not the agent. The agent sees a result only in a prompt, and only when the feedback policy (FR-35) calls for a turn, so watching a PR costs no tokens. Intervals are configurable, with defaults chosen by planners. API use should be proportionate, for example conditional requests, a slower pace for quiet or suspended efforts, and a faster one just after a push. The agent may still check GitHub itself during a turn.
+- **FR-34** The harness must watch each effort's open PR for its state (ready for review, merged, closed), review comments, review summaries, conversation comments and failing CI checks. Each item must be handled exactly once. Nothing may be missed or handled twice, including items that arrive during a turn. An item counts as handled once it has been included in a prompt sent to the agent, or when I dismiss it.
+  - **Watching principle.** The harness watches GitHub whenever it has a reason to, at a pace suited to that reason: whether a PR exists for an effort's branch (FR-33), PR state, new feedback, CI results. The harness does the watching, not the agent. The agent sees a result only in a prompt, and only when the feedback policy (FR-35) calls for a turn, so watching a PR costs no tokens. How quickly a change is noticed is configurable, with defaults chosen by planners. API use should be proportionate, for example a slower pace for quiet or suspended efforts and a faster one just after a push. The agent may still check GitHub itself during a turn.
 - **FR-35** What happens when new feedback appears is set by a **feedback policy**, configurable globally and per repo, with a per-effort override.
   - **notify (default).** No turn starts. The harness raises an attention item (FR-40) naming the PR, the authors and the number of new items. Items that arrive close together are batched by a configurable quiet period, and the existing item is updated rather than duplicated. The command center offers a "discuss feedback" action. It sends the effort a prompt, built from a configurable template, that includes the new items and asks what the agent thinks of each and what it would do, without making changes. I can also write my own prompt instead, for example "rob left feedback on PR 123, what do you think?"
   - **auto.** The harness continues the effort's session at once with a prompt saying there is new feedback on PR #n to read and address. A submitted review triggers a turn immediately. Loose comments trigger one after the quiet period, so a burst of comments produces one turn.
@@ -291,7 +291,7 @@ These follow from the command center and the host platforms. Planners must accou
     - new feedback on a PR, under the notify policy (FR-35)
     - PR merged or closed, so the effort is ready to tear down (FR-37)
     - effort is waiting on me: a turn finished and nothing else is queued
-  - **Needs input:** the instruction template (FR-29) and every follow-up prompt must give the agent a convention for saying it is blocked on a decision, and the harness must detect it in the turn output. Planners choose the mechanism. A turn that ends this way is recorded with the outcome "needs input" and is not treated as an ordinary success.
+  - **Needs input:** the harness must detect a turn that ends with the agent blocked on a decision from me. Planners choose the mechanism (§7.1). A turn that ends this way is recorded with the outcome "needs input" and is not treated as an ordinary success.
   - Which types produce a desktop notification (FR-47) is configurable. By default, all of them do.
   - Open items must show in the effort list (FR-39).
 - **FR-41** I must be able to view a readable rendering of any turn, finished or running: assistant text and tool calls. FR-42 presents these as a continuous conversation.
@@ -303,7 +303,7 @@ These follow from the command center and the host platforms. Planners must accou
   - Each prompt records where it came from: me in the command center, me in the CLI, "discuss feedback" (FR-35), or the auto feedback policy.
   - **Answering a question.** An attention item of type "needs input" (FR-40) opens the conversation at the agent's question. Replying in the view closes the item.
   - Viewing does not attach (FR-25) and has no effect on the effort's status.
-  - The view is built from the incrementally written host-side record (FR-23), so it survives a harness restart (NFR-8).
+  - The view matches the host-side record (FR-23) and survives a harness restart (NFR-8).
 - **FR-43** I must be able to see where disk space goes and what each worker is pinned to, from the CLI and the command center.
   - **Per worker** (suspended ones included): the master version it is pinned to and whether that is the current master, the disk space its clone actually uses on the host, and the configured maximum (FR-15).
   - **Per master version:** whether it is current, how many workers depend on it, and its size on disk.
@@ -341,9 +341,9 @@ Platform and technology constraints (see also NFR-7):
 - **NFR-7 Host portability:** the harness and command center must install and run on both Omarchy (Arch-based) and Fedora. Packaging may differ per distribution. Dependencies must be available on both, and nothing may assume a particular distribution's paths or package manager at runtime.
 - **NFR-8 Reconciliation:** the harness must survive a restart of itself or a reboot of the host without losing efforts. On start, and periodically, it must compare the registry with the VMs, disks and clones that actually exist, then adopt, resume or clean up anything that disagrees. A turn that was running when the harness died is marked interrupted and remains resumable, unless it is re-attached (below). Orphaned VMs and disks are removed.
   - **In-VM turn processes.** The harness dying may leave the turn's `claude` process running on the worker. No second turn process may run alongside it. Before the effort can accept another turn (FR-24), reconciliation must either re-attach to the surviving process or stop it, gracefully first as in FR-26. No effort may start a turn, or show no turn running, while a turn process the harness is not tracking is still running on its worker.
-  - **Complete the record.** Before marking the turn interrupted, reconciliation must copy any output the worker's session transcript holds beyond the host-side record (FR-23), so the conversation view (FR-42) does not lose the end of the turn.
+  - **Complete the record.** Before marking the turn interrupted, reconciliation must bring the host-side record (FR-23) up to date with everything the turn produced, so the conversation view (FR-42) does not lose the end of the turn.
   - **Not required in v1:** re-attaching to a surviving turn so that it completes. Losing the rest of an in-flight turn on a harness restart is accepted. Planners may re-attach, if they can still meet every other requirement here.
-  - Whether a dropped SSH connection kills the turn process must be checked against the pinned Claude Code version, not assumed.
+  - Whether the turn process survives the harness losing its connection to the worker must be checked against the pinned Claude Code version and the chosen transport, not assumed.
 
 ## 6. Accepted Risks
 
@@ -374,7 +374,7 @@ These are decided during planning. The requirements set the constraints and leav
 - Exact `~/.claude.json` fields to carry into the master (FR-18).
 - Where the GitHub token lives: in the master, or supplied to each worker at spawn (FR-19).
 - The remaining transitions (FR-32), and which single status the effort list leads with when several parts apply.
-- The mechanism for the "needs input" convention (FR-40).
+- How a turn that ends blocked on me is detected (FR-40).
 - Whether the content-filter seam (NFR-6) also enforces the author allowlist (FR-38).
 - How attachment is detected (FR-25). Options include an attach command that holds a per-worker lock, a check for a live interactive `claude` process before each turn, and a `claude` wrapper in the worker that takes the same lock however it is launched. The wrapper closes the race that a check before each turn leaves open.
 - How the marker is applied (FR-36), for example a `gh` wrapper in the worker, and how other routes for writing to GitHub are covered.
@@ -420,7 +420,7 @@ Each criterion says what to do and what observable result passes it. "Observable
   - Pass when: the refresh reports failure with the reason. The current master has the same version and image checksum as before. No partial version appears in the version list or on disk.
 - [ ] **AC-3 Worker identity** (FR-6, FR-7, FR-8)
   - Do: spawn two workers from the same master version.
-  - Pass when: both are reachable as `ssh <worker-name>`. Hostnames, MAC addresses and SSH host keys all differ.
+  - Pass when: both are reachable as `ssh <worker-name>`. Hostnames, MAC addresses, SSH host keys and machine-ids all differ.
 - [ ] **AC-4 Fresh code** (FR-9)
   - Do: push a new commit to the test repo's default branch after the master was built, then spawn a worker.
   - Pass when: before the first turn starts, the worker's repo is at that commit.
@@ -438,7 +438,7 @@ Each criterion says what to do and what observable result passes it. "Observable
   - Pass when: in (a), the app still responds. In (b), it responds again once the worker is resumed and before the turn starts. In (c), the restart records no turn. In (d), the effort is `failed`, an attention item is open, and the prep log is on the host. With the repo set to continue past failure, the effort proceeds and the failure is still recorded.
 - [ ] **AC-9 Merge, teardown and pruning** (FR-5, FR-12, FR-37)
   - Do: (a) with the merge/close teardown policy off, merge an effort's PR. (b) Tear that effort down by hand. (c) Turn the policy on and merge a second effort's PR. (d) Try to prune the master version they used, first while another worker still uses that version and again once none does.
-  - Pass when: in (a), within one poll interval the effort records the merged PR and an attention item is open, while the worker, its disk and the effort's status are unchanged, and later comments on the merged PR raise nothing. In (b), the worker and disk are gone, the transcript is on the host and the state is `done`. In (c), within one poll interval the worker and disk are gone, the state is `done` and the transcript is on the host. In (d), pruning is refused while a worker depends on the version and succeeds when none does.
+  - Pass when: in (a), within the configured detection time the effort records the merged PR and an attention item is open, while the worker, its disk and the effort's status are unchanged, and later comments on the merged PR raise nothing. In (b), the worker and disk are gone, the transcript is on the host and the state is `done`. In (c), within the configured detection time the worker and disk are gone, the state is `done` and the transcript is on the host. In (d), pruning is refused while a worker depends on the version and succeeds when none does.
 
 ### 8.2 Turns and sessions
 
@@ -458,7 +458,7 @@ Each criterion says what to do and what observable result passes it. "Observable
   - Do: stub a usage-limit failure on a turn, with a reset time a short way ahead.
   - Pass when: the effort shows `rate-limited` and I am notified. Pending turns are queued. After the stubbed reset, the turns run with no action from me.
 - [ ] **AC-15 Needs input** (FR-40, FR-47)
-  - Do: (a) feed the harness canned turn output that uses the needs-input convention. (b) Run one live turn on a task that cannot proceed without a decision from me. In both cases, keep the command center closed until after the turn ends.
+  - Do: (a) feed the harness canned turn output in which the agent is blocked on a decision from me. (b) Run one live turn on a task that cannot proceed without a decision from me. In both cases, keep the command center closed until after the turn ends.
   - Pass when: the outcome is "needs input", an attention item is open, and a notification was sent. When the command center starts, it shows the open item. Replying to the question in the conversation view starts a turn in the same session and closes the item.
 
 ### 8.3 Concurrency and the feedback loop
@@ -529,7 +529,7 @@ AC-17 to AC-21 run with the feedback policy set to **auto**. AC-35 covers the de
 
 - [ ] **AC-34 Conversation view** (FR-42, FR-23)
   - Do: replay a canned slow turn that emits text and tool calls over about 60 seconds. (a) Open the effort's conversation view from the start. (b) Open it in a second client 30 seconds in. (c) Send a message while the turn is running. (d) Kill the harness with SIGKILL at 40 seconds, restart it and open the view again.
-  - Pass when: in (a), items appear within a few seconds of being emitted. In (b), the conversation so far appears, then continues live, with nothing missing or duplicated against the host-side record. In (c), the message shows as queued, then runs after the turn ends in the same session, and the turn record shows it came from the command center. In (d), the output up to the kill is still on the host, no `claude` process from the turn remains on the worker, and the turn is marked "interrupted" (NFR-8), unless planners chose to re-attach, in which case the turn completes. Output the worker's session transcript held beyond the host record appears in the view after the restart. Viewing changes neither the effort's status nor the turn records.
+  - Pass when: in (a), items appear within a few seconds of being emitted. In (b), the conversation so far appears, then continues live, with nothing missing or duplicated against the host-side record. In (c), the message shows as queued, then runs after the turn ends in the same session, and the turn record shows it came from the command center. In (d), the output up to the kill is still on the host, no `claude` process from the turn remains on the worker, and the turn is marked "interrupted" (NFR-8), unless planners chose to re-attach, in which case the turn completes. Output the turn produced that had not reached the host at the kill appears in the view after the restart. Viewing changes neither the effort's status nor the turn records.
 - [ ] **AC-35 Feedback under notify** (FR-34, FR-35, FR-36)
   - Do: with the default notify policy, have the other author submit a review on PR A and post three loose comments. Then use "discuss feedback" in the command center. Then post one more comment, and have the agent reply with a marked comment.
   - Pass when: no turn starts from the feedback. There is a single attention item for A covering the review and comments, updated rather than duplicated. B and C have none. "Discuss feedback" sends a prompt in A's existing session that includes exactly those items and asks for an assessment without changes. No commit appears. The later comment raises a new item that does not repeat the earlier ones. The agent's marked reply raises nothing.
